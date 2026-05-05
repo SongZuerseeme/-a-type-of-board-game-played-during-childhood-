@@ -9,6 +9,7 @@ function cn(...inputs: ClassValue[]) {
 }
 
 type PieceType = 'PIG' | 'SOLDIER';
+type Difficulty = 'EASY' | 'MEDIUM' | 'HARD';
 type Point = { x: number; y: number };
 type CaptureType = 'VERTEX' | 'SHOULDER' | 'FIVELINE';
 
@@ -26,6 +27,7 @@ interface GameState {
   winner: PieceType | 'DRAW' | null;
   pendingCaptures: CaptureGroup[];
   isAiEnabled: boolean;
+  difficulty: Difficulty;
 }
 
 const BOARD_SIZE = 5;
@@ -54,6 +56,7 @@ export const LaoZhuQi: React.FC = () => {
     winner: null,
     pendingCaptures: [],
     isAiEnabled: true,
+    difficulty: 'MEDIUM',
   });
   const [selectedForCapture, setSelectedForCapture] = useState<Point[]>([]);
   const [isAiThinking, setIsAiThinking] = useState(false);
@@ -83,41 +86,36 @@ export const LaoZhuQi: React.FC = () => {
     }
 
     let bestMove: { from: Point; to: Point } | null = null;
-    let maxScore = -Infinity;
 
-    // Evaluate all possible moves for all soldiers
-    for (const soldier of soldiers) {
-      const moves = getValidMoves(soldier, board);
-      for (const move of moves) {
-        // Simulate move
-        const newBoard = board.map(row => [...row]);
-        newBoard[move.y][move.x] = 'SOLDIER';
-        newBoard[soldier.y][soldier.x] = null;
+    if (gameState.difficulty === 'EASY') {
+      const allPossibleMoves: { from: Point; to: Point }[] = [];
+      for (const soldier of soldiers) {
+        const moves = getValidMoves(soldier, board);
+        moves.forEach(m => allPossibleMoves.push({ from: soldier, to: m }));
+      }
+      if (allPossibleMoves.length > 0) {
+        bestMove = allPossibleMoves[Math.floor(Math.random() * allPossibleMoves.length)];
+      }
+    } else if (gameState.difficulty === 'MEDIUM') {
+      let maxScore = -Infinity;
+      for (const soldier of soldiers) {
+        const moves = getValidMoves(soldier, board);
+        for (const move of moves) {
+          const newBoard = board.map(row => [...row]);
+          newBoard[move.y][move.x] = 'SOLDIER';
+          newBoard[soldier.y][soldier.x] = null;
 
-        let score = 0;
-
-        // 1. Distance to Pig (closer is usually better for trapping)
-        const dist = Math.sqrt(Math.pow(move.x - pigPos.x, 2) + Math.pow(move.y - pigPos.y, 2));
-        score -= dist * 2; 
-
-        // 2. Pig's mobility (fewer moves for pig = better)
-        const pigMoves = getValidMoves(pigPos, newBoard);
-        score += (8 - pigMoves.length) * 10;
-
-        // 3. Safety Check: If this move allows the Pig to capture pieces, heavily penalize it
-        const potentialCaptures = findCaptures(pigPos, newBoard);
-        if (potentialCaptures.length > 0) {
-          score -= 1000; // Major penalty
-        }
-
-        // Add some randomness for variety
-        score += Math.random() * 2;
-
-        if (score > maxScore) {
-          maxScore = score;
-          bestMove = { from: soldier, to: move };
+          let score = evaluateBoard(newBoard, pigPos, 'MEDIUM');
+          if (score > maxScore) {
+            maxScore = score;
+            bestMove = { from: soldier, to: move };
+          }
         }
       }
+    } else {
+      // HARD: Minimax with depth 3
+      let result = minimax(board, pigPos, 3, true, -Infinity, Infinity);
+      bestMove = result.move;
     }
 
     if (bestMove) {
@@ -129,6 +127,127 @@ export const LaoZhuQi: React.FC = () => {
     }
     
     setIsAiThinking(false);
+  };
+
+  const evaluateBoard = (board: (PieceType | null)[][], pigPos: Point, difficulty: Difficulty): number => {
+    let score = 0;
+    const soldierCount = board.flat().filter(p => p === 'SOLDIER').length;
+
+    // 1. Distance to Pig
+    const dist = Math.sqrt(Math.pow(2 - pigPos.x, 2) + Math.pow(2 - pigPos.y, 2)); // Center distance
+    const distToPig = board.reduce((acc, row, y) => {
+      row.forEach((p, x) => {
+        if (p === 'SOLDIER') {
+          acc += Math.sqrt(Math.pow(x - pigPos.x, 2) + Math.pow(y - pigPos.y, 2));
+        }
+      });
+      return acc;
+    }, 0) / soldierCount;
+    score -= distToPig * 5;
+
+    // 2. Pig's mobility
+    const pigMoves = getValidMoves(pigPos, board);
+    score += (8 - pigMoves.length) * 15;
+
+    // 3. Safety Check: If this move allows the Pig to capture pieces, heavily penalize it
+    const potentialCaptures = findCaptures(pigPos, board);
+    if (potentialCaptures.length > 0) {
+      const totalCaptureCount = potentialCaptures.reduce((acc, g) => acc + g.points.length, 0);
+      score -= totalCaptureCount * 100;
+    }
+
+    // 4. Soldier clustering (encircle pig)
+    if (difficulty === 'HARD') {
+        const avgX = board.reduce((acc, row, y) => acc + row.reduce((sa, p, x) => p === 'SOLDIER' ? sa + x : sa, 0), 0) / soldierCount;
+        const avgY = board.reduce((acc, row, y) => acc + row.reduce((sa, p, x) => p === 'SOLDIER' ? sa + y : sa, 0), 0) / soldierCount;
+        const alignment = Math.sqrt(Math.pow(avgX - pigPos.x, 2) + Math.pow(avgY - pigPos.y, 2));
+        score -= alignment * 10;
+        
+        // Bonus for cornering
+        if (pigMoves.length <= 1) score += 500;
+        if (pigMoves.length === 0) score += 10000;
+    }
+
+    return score + Math.random() * 0.5;
+  };
+
+  const minimax = (
+    board: (PieceType | null)[][], 
+    pigPos: Point, 
+    depth: number, 
+    isMaximizing: boolean,
+    alpha: number,
+    beta: number
+  ): { score: number; move: { from: Point; to: Point } | null } => {
+    // Check terminal states
+    let soldierCount = 0;
+    for (let y = 0; y < BOARD_SIZE; y++) {
+      for (let x = 0; x < BOARD_SIZE; x++) {
+        if (board[y][x] === 'SOLDIER') soldierCount++;
+      }
+    }
+
+    const pigMoves = getValidMoves(pigPos, board);
+    if (soldierCount <= 2) return { score: -100000, move: null };
+    if (pigMoves.length === 0) return { score: 100000, move: null };
+    if (depth === 0) return { score: evaluateBoard(board, pigPos, 'HARD'), move: null };
+
+    if (isMaximizing) {
+      let maxEval = -Infinity;
+      let bestMove: { from: Point; to: Point } | null = null;
+      
+      const soldiers: Point[] = [];
+      for (let y = 0; y < BOARD_SIZE; y++) {
+        for (let x = 0; x < BOARD_SIZE; x++) {
+          if (board[y][x] === 'SOLDIER') soldiers.push({ x, y });
+        }
+      }
+
+      for (const soldier of soldiers) {
+        const moves = getValidMoves(soldier, board);
+        for (const move of moves) {
+          const newBoard = board.map(row => [...row]);
+          newBoard[move.y][move.x] = 'SOLDIER';
+          newBoard[soldier.y][soldier.x] = null;
+          
+          // Detect if Pig would move next or wait for capture resolution?
+          // For simplicity in minimax, assume Pig just moves next
+          const nextEval = minimax(newBoard, pigPos, depth - 1, false, alpha, beta).score;
+          if (nextEval > maxEval) {
+            maxEval = nextEval;
+            bestMove = { from: soldier, to: move };
+          }
+          alpha = Math.max(alpha, nextEval);
+          if (beta <= alpha) break;
+        }
+        if (beta <= alpha) break;
+      }
+      return { score: maxEval, move: bestMove };
+    } else {
+      let minEval = Infinity;
+      const moves = getValidMoves(pigPos, board);
+      
+      for (const move of moves) {
+        const newBoard = board.map(row => [...row]);
+        newBoard[move.y][move.x] = 'PIG';
+        newBoard[pigPos.y][pigPos.x] = null;
+
+        // Check for captures
+        const captures = findCaptures(move, newBoard);
+        if (captures.length > 0) {
+            // Assume pig eats everything for eval
+            captures.flatMap(g => g.points).forEach(p => {
+                newBoard[p.y][p.x] = null;
+            });
+        }
+
+        const nextEval = minimax(newBoard, move, depth - 1, true, alpha, beta).score;
+        minEval = Math.min(minEval, nextEval);
+        beta = Math.min(beta, nextEval);
+        if (beta <= alpha) break;
+      }
+      return { score: minEval, move: null };
+    }
   };
 
   const isValidPos = (x: number, y: number) => x >= 0 && x < BOARD_SIZE && y >= 0 && y < BOARD_SIZE;
@@ -343,6 +462,7 @@ export const LaoZhuQi: React.FC = () => {
       winner: null,
       pendingCaptures: [],
       isAiEnabled: gameState.isAiEnabled,
+      difficulty: gameState.difficulty,
     });
     setSelectedForCapture([]);
   };
@@ -369,6 +489,10 @@ export const LaoZhuQi: React.FC = () => {
 
   const toggleAi = () => {
     setGameState(prev => ({ ...prev, isAiEnabled: !prev.isAiEnabled }));
+  };
+
+  const setDifficulty = (diff: Difficulty) => {
+    setGameState(prev => ({ ...prev, difficulty: diff }));
   };
 
   const soldierCount = gameState.board.flat().filter(p => p === 'SOLDIER').length;
@@ -601,7 +725,7 @@ export const LaoZhuQi: React.FC = () => {
               </div>
             )}
 
-            {soldierCount === 3 && !gameState.winner && (
+            {soldierCount <= 4 && !gameState.winner && (
               <button
                 onClick={handleDraw}
                 className="w-full py-2 bg-indigo-600/20 hover:bg-indigo-600/30 text-indigo-400 border border-indigo-500/30 font-bold rounded-lg transition-colors text-sm flex items-center justify-center gap-2"
@@ -648,6 +772,28 @@ export const LaoZhuQi: React.FC = () => {
             </div>
             {gameState.isAiEnabled ? "AI 对抗模式: 已开启" : "双人本地对战模式"}
           </button>
+
+          {gameState.isAiEnabled && (
+            <div className="p-4 bg-zinc-900 border border-zinc-800 rounded-2xl space-y-3">
+              <h3 className="text-[10px] font-bold uppercase tracking-widest text-zinc-600">AI 难度等级</h3>
+              <div className="grid grid-cols-3 gap-2">
+                {(['EASY', 'MEDIUM', 'HARD'] as Difficulty[]).map((d) => (
+                  <button
+                    key={d}
+                    onClick={() => setDifficulty(d)}
+                    className={cn(
+                      "py-2 text-[10px] font-bold rounded-lg transition-all border",
+                      gameState.difficulty === d
+                        ? "bg-blue-500/20 border-blue-500 text-blue-400"
+                        : "bg-zinc-800 border-zinc-700 text-zinc-500 hover:text-zinc-300"
+                    )}
+                  >
+                    {d === 'EASY' ? '简单' : d === 'MEDIUM' ? '中等' : '困难'}
+                  </button>
+                ))}
+              </div>
+            </div>
+          )}
 
           {/* Rules Summary */}
           <div className="p-4 border border-zinc-800/50 rounded-2xl bg-zinc-900/30">
