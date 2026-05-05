@@ -1,0 +1,6 @@
+{
+  "name": "老猪棋 (Lao Zhu Qi)",
+  "description": "一种流传于中国民间的传统棋类游戏。由一名‘猪’与十六名‘卒’对抗，规则丰富有趣。支持悔棋、重开等功能。",
+  "requestFramePermissions": [],
+  "majorCapabilities": []
+}
